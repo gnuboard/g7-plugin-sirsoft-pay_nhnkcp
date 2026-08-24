@@ -8,9 +8,10 @@ namespace Plugins\Sirsoft\PayNhnkcp\Controllers;
 
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Modules\Sirsoft\Ecommerce\Models\ClaimPayment;
 use Modules\Sirsoft\Ecommerce\Models\Order;
 use Modules\Sirsoft\Ecommerce\Services\OrderProcessingService;
-use Plugins\Sirsoft\PayNhnkcp\Concerns\BindsMobileVbankSession;
+use Plugins\Sirsoft\PayNhnkcp\Concerns\HandlesClaimPaymentCallbacks;
 use Plugins\Sirsoft\PayNhnkcp\Concerns\RecordsPaymentWindowClosure;
 use Plugins\Sirsoft\PayNhnkcp\Exceptions\NhnKcpApiException;
 use Plugins\Sirsoft\PayNhnkcp\Services\KcpSoapService;
@@ -23,7 +24,7 @@ use Plugins\Sirsoft\PayNhnkcp\Services\KcpSoapService;
  */
 class MobileApprovalController
 {
-    use BindsMobileVbankSession;
+    use HandlesClaimPaymentCallbacks;
     use RecordsPaymentWindowClosure;
 
     /** 결제수단 → KCP 모바일 pay_method 코드 */
@@ -109,55 +110,79 @@ class MobileApprovalController
         $useEscrow = (bool) ($settings['use_escrow'] ?? false) && ! $isEasyPay;
 
         try {
-            $order = $this->orderService->findByOrderNumber($validated['order_number']);
-            if (! $order) {
-                return response()->json([
-                    'success' => false,
-                    'error' => 'Order not found.',
-                ], 404);
-            }
+            $order = null;
 
-            if ((int) $order->user_id !== (int) ($request->user()?->id ?? 0)) {
-                return response()->json([
-                    'success' => false,
-                    'error' => 'You cannot request a NHN KCP approval key for this order.',
-                ], 403);
-            }
-
-            $expectedAmount = $this->resolveExpectedPaymentPriceOrNull($order, 'mobile_approval_key', [
-                'order_number' => $validated['order_number'],
-                'requested_amount' => $validated['amount'],
-                'requested_currency' => $validated['currency'] ?? null,
-                'ip' => $request->ip(),
-            ]);
-            if ($expectedAmount === null) {
-                return response()->json([
-                    'success' => false,
-                    'error' => 'Payment currency is not chargeable.',
-                ], 422);
-            }
-
-            if ((int) $validated['amount'] !== $expectedAmount) {
-                return response()->json([
-                    'success' => false,
-                    'error' => 'Payment amount does not match the order amount.',
-                ], 422);
-            }
-
-            if (! $this->isKrwPayment($order, $validated['currency'] ?? null)) {
-                return response()->json([
-                    'success' => false,
-                    'error' => 'NHN KCP supports KRW payments only.',
-                ], 422);
-            }
-
-            if (! $order->order_status->isBeforePayment()) {
-                $restored = $this->restoreRetryableKcpOrder($order, (int) $validated['amount']);
-                if (! $restored) {
+            // 클레임 추가결제(CP 채번)는 주문이 아니다 — 결제 건 기준으로 같은 강도의 검증을 적용한다.
+            if (ClaimPayment::isClaimPaymentNumber($validated['order_number'])) {
+                // 입금 대기 수단(가상계좌)은 클레임 결제 상태 모델에 대기 상태가 없어 지원하지 않는다.
+                if ($mobilePayMethod === 'VCNT') {
                     return response()->json([
                         'success' => false,
-                        'error' => 'Order is not retryable for NHN KCP payment.',
-                    ], 409);
+                        'error' => 'Claim additional payments do not support deposit-pending methods (virtual account).',
+                    ], 422);
+                }
+
+                $claimError = $this->validateClaimApprovalKeyContext(
+                    $request,
+                    (string) $validated['order_number'],
+                    (int) $validated['amount'],
+                    $validated['currency'] ?? null,
+                );
+
+                if ($claimError !== null) {
+                    return $claimError;
+                }
+            } else {
+                $order = $this->orderService->findByOrderNumber($validated['order_number']);
+                if (! $order) {
+                    return response()->json([
+                        'success' => false,
+                        'error' => 'Order not found.',
+                    ], 404);
+                }
+
+                if ((int) $order->user_id !== (int) ($request->user()?->id ?? 0)) {
+                    return response()->json([
+                        'success' => false,
+                        'error' => 'You cannot request a NHN KCP approval key for this order.',
+                    ], 403);
+                }
+
+                $expectedAmount = $this->resolveExpectedPaymentPriceOrNull($order, 'mobile_approval_key', [
+                    'order_number' => $validated['order_number'],
+                    'requested_amount' => $validated['amount'],
+                    'requested_currency' => $validated['currency'] ?? null,
+                    'ip' => $request->ip(),
+                ]);
+                if ($expectedAmount === null) {
+                    return response()->json([
+                        'success' => false,
+                        'error' => 'Payment currency is not chargeable.',
+                    ], 422);
+                }
+
+                if ((int) $validated['amount'] !== $expectedAmount) {
+                    return response()->json([
+                        'success' => false,
+                        'error' => 'Payment amount does not match the order amount.',
+                    ], 422);
+                }
+
+                if (! $this->isKrwPayment($order, $validated['currency'] ?? null)) {
+                    return response()->json([
+                        'success' => false,
+                        'error' => 'NHN KCP supports KRW payments only.',
+                    ], 422);
+                }
+
+                if (! $order->order_status->isBeforePayment()) {
+                    $restored = $this->restoreRetryableKcpOrder($order, (int) $validated['amount']);
+                    if (! $restored) {
+                        return response()->json([
+                            'success' => false,
+                            'error' => 'Order is not retryable for NHN KCP payment.',
+                        ], 409);
+                    }
                 }
             }
 
@@ -191,7 +216,7 @@ class MobileApprovalController
                 'quotaopt' => '12',
                 'currency' => '410',
                 'approval_key' => $result['approval_key'],
-                ...$this->buildTaxFields($order, (int) $validated['amount']),
+                ...($order !== null ? $this->buildTaxFields($order, (int) $validated['amount']) : []),
             ];
 
             // 가상계좌 전용 파라미터
@@ -199,21 +224,6 @@ class MobileApprovalController
                 $settings = plugin_settings(self::PLUGIN_IDENTIFIER) ?? [];
                 $fields['vcnt_expire_term'] = (string) ((int) ($settings['vbank_expire_days'] ?? 3));
                 $fields['disp_tax_yn'] = 'N';
-
-                // 모바일 가상계좌 콜백은 계좌번호를 브라우저 평문으로만 전달한다.
-                // 이 지점은 소유자 인증(auth:sanctum)을 통과했으므로 여기서 만든 일회성
-                // nonce 를 passthrough 파라미터로 실어 보내고, 콜백에서 되돌아온 값과
-                // 대조해 그 콜백이 이 결제 세션에서 비롯됐음을 확인한다 (KVE-2026-2019).
-                // param_opt_1 은 간편결제 수단 식별자가 점유하므로 param_opt_2 를 쓴다.
-                $mobileVbankState = $this->issueMobileVbankState($order);
-                if ($mobileVbankState === null) {
-                    return response()->json([
-                        'success' => false,
-                        'error' => 'Failed to prepare the virtual account payment session.',
-                    ], 500);
-                }
-
-                $fields['param_opt_2'] = $mobileVbankState;
             }
 
             if ($isEasyPay) {

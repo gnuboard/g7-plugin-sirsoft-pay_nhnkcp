@@ -31,7 +31,23 @@
 
 상세: [docs/backend/middleware.md "확장 미들웨어 선언 (self-gate)"](../../../../../docs/backend/middleware.md).
 
-**형식이 틀린 통보**: 필수 값이 없거나 형식이 다른 요청은 `422` JSON(`{success: false, message, errors}`)으로 끝난다 — 직전 페이지(Referer)·요청 Host 로 이동(302)하지 않는다. PG 에는 302 와 같은 실패라 재전송 동작은 바뀌지 않는다.
+### 운영자에게 표시되는 통보 URL
+
+관리자 설정 화면은 `GET /api/plugins/sirsoft-pay_nhnkcp/admin/vbank-notify-url`(라우트명 `api.plugins.sirsoft-pay_nhnkcp.vbank.notify.url`, `auth:sanctum` + `admin`)로 위 두 경로의 **전체 주소**를 받아 표시한다. 운영자는 그 값을 NHN KCP 상점관리자에 등록한다.
+
+응답 예:
+
+```json
+{
+  "success": true,
+  "data": {
+    "url": "https://example.com/plugins/sirsoft-pay_nhnkcp/payment/vbank-notify",
+    "escrow_common_notify_url": "https://example.com/plugins/sirsoft-pay_nhnkcp/payment/escrow-common-notify"
+  }
+}
+```
+
+주소는 **사이트 설정의 기준 주소**에서 만들어진다 — 이 요청이 어떤 호스트로 들어왔는지는 보지 않는다. 앞단에 프록시·로드밸런서를 두었거나 사이트가 하위 폴더(`https://example.com/shop/`)에 설치된 배치에서도 결제대행사가 실제로 접속할 수 있는 하나의 주소가 나오도록 하기 위함이다. 표시된 주소가 바깥에서 닿지 않는다면 먼저 **환경설정의 사이트 주소**가 실제 서비스 주소와 같은지 확인한다.
 
 ---
 
@@ -39,7 +55,7 @@
 
 모바일(SmartPhone Pay) 가상계좌는 PC 와 달리 **서버-서버 승인이 없다**. KCP 가 계좌번호를 브라우저 평문 POST 로만 전달하므로, 콜백만으로는 그 값이 KCP 에서 온 것인지 확인할 수 없다.
 
-그래서 승인키 발급(`POST /api/plugins/sirsoft-pay_nhnkcp/mobile/approval-key`, 주문 소유자 확인 필요 — 회원 로그인 또는 비회원 조회 토큰)이 가상계좌 요청일 때 일회성 확인값을 만들어 주문에 저장하고, 결제창 필드 `param_opt_2` 로 실어 보낸다. KCP 는 이 값을 콜백에 그대로 되돌려주므로 콜백은 저장된 값과 대조한 뒤에만 계좌를 저장한다.
+그래서 승인키 발급(`POST /api/plugins/sirsoft-pay_nhnkcp/mobile/approval-key`, 구매자 인증 필요)이 가상계좌 요청일 때 일회성 확인값을 만들어 주문에 저장하고, 결제창 필드 `param_opt_2` 로 실어 보낸다. KCP 는 이 값을 콜백에 그대로 되돌려주므로 콜백은 저장된 값과 대조한 뒤에만 계좌를 저장한다.
 
 | 항목 | 값 |
 | --- | --- |

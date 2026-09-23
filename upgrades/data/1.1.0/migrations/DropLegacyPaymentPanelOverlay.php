@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace App\Upgrades\Data\Ext\Plugins\SirsoftPayNhnkcp\V1_0_4\Migrations;
+namespace App\Upgrades\Data\Ext\Plugins\SirsoftPayNhnkcp\V1_1_0\Migrations;
 
 use App\Extension\Upgrade\DataMigration;
 use App\Extension\UpgradeContext;
